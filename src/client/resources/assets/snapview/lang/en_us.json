@@ -1,0 +1,33 @@
+{
+  "key.snapview.open_gallery": "Open Screenshot Gallery",
+  "key.categories.snapview": "SnapView",
+
+  "snapview.gallery.title": "Screenshots",
+  "snapview.gallery.empty": "No screenshots yet. Press F2 to take one!",
+  "snapview.gallery.loading": "Loading screenshots...",
+  "snapview.gallery.count": "%s screenshots",
+  "snapview.gallery.back": "Back",
+
+  "snapview.viewer.rename": "Rename",
+  "snapview.viewer.copy": "Copy",
+  "snapview.viewer.next": "Next",
+  "snapview.viewer.previous": "Previous",
+  "snapview.viewer.delete": "Delete",
+  "snapview.viewer.delete.confirm": "Delete this screenshot? This cannot be undone.",
+
+  "snapview.rename.title": "Rename Screenshot",
+  "snapview.rename.confirm": "Rename",
+  "snapview.rename.cancel": "Cancel",
+  "snapview.rename.error.empty": "Name cannot be empty.",
+  "snapview.rename.error.invalid": "Name contains invalid characters.",
+  "snapview.rename.error.exists": "A screenshot with that name already exists.",
+  "snapview.rename.error.failed": "Rename failed: %s",
+  "snapview.rename.success": "Renamed to %s",
+
+  "snapview.clipboard.copied": "Screenshot copied to clipboard",
+  "snapview.clipboard.failed": "Could not copy screenshot to clipboard",
+
+  "snapview.chat.copy": "[Copy]",
+  "snapview.chat.gallery": "[Open Screenshot Menu]",
+  "snapview.chat.saved": "Screenshot saved"
+}

@@ -1,6 +1,6 @@
 {
   "key.snapview.open_gallery": "Open Screenshot Gallery",
-  "key.categories.snapview": "SnapView",
+  "key.category.snapview.snapview": "SnapView",
 
   "snapview.gallery.title": "Screenshots",
   "snapview.gallery.empty": "No screenshots yet. Press F2 to take one!",

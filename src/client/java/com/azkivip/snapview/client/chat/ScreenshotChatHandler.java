@@ -37,58 +37,60 @@ import net.minecraft.network.chat.contents.TranslatableContents;
  */
 public final class ScreenshotChatHandler {
 
-	private static final String SCREENSHOT_TRANSLATION_KEY = "screenshot.success";
+        private static final String SCREENSHOT_TRANSLATION_KEY = "screenshot.success";
 
-	private final ScreenshotRepository repository;
+        private final ScreenshotRepository repository;
 
-	public ScreenshotChatHandler(ScreenshotRepository repository) {
-		this.repository = repository;
-	}
+        public ScreenshotChatHandler(ScreenshotRepository repository) {
+                this.repository = repository;
+        }
 
-	public void register() {
-		ClientReceiveMessageEvents.ALLOW_GAME.register(this::onGameMessage);
-	}
+        public void register() {
+                ClientReceiveMessageEvents.ALLOW_GAME.register(this::onGameMessage);
+        }
 
-	private boolean onGameMessage(Component message, boolean overlay) {
-		if (overlay || !isScreenshotMessage(message)) {
-			return true; // Not our message - let it through unchanged.
-		}
+        private boolean onGameMessage(Component message, boolean overlay) {
+                if (overlay || !isScreenshotMessage(message)) {
+                        return true; // Not our message - let it through unchanged.
+                }
 
-		ScreenshotEntry newest = repository.findNewestOnDisk();
-		if (newest == null) {
-			return true; // Couldn't resolve a file; fall back to vanilla behaviour rather than show a broken message.
-		}
+                ScreenshotEntry newest = repository.findNewestOnDisk();
+                if (newest == null) {
+                        return true; // Couldn't resolve a file; fall back to vanilla behaviour rather than show a broken message.
+                }
 
-		sendCustomMessage(newest);
-		return false; // Suppress the vanilla message.
-	}
+                sendCustomMessage(newest);
+                return false; // Suppress the vanilla message.
+        }
 
-	private static boolean isScreenshotMessage(Component message) {
-		if (message.getContents() instanceof TranslatableContents translatable) {
-			return SCREENSHOT_TRANSLATION_KEY.equals(translatable.getKey());
-		}
-		// Defensive fallback in case the translation-key check ever misses:
-		// still never crashes, just declines to intercept.
-		return false;
-	}
+        private static boolean isScreenshotMessage(Component message) {
+                if (message.getContents() instanceof TranslatableContents translatable) {
+                        return SCREENSHOT_TRANSLATION_KEY.equals(translatable.getKey());
+                }
+                // Defensive fallback in case the translation-key check ever misses:
+                // still never crashes, just declines to intercept.
+                return false;
+        }
 
-	private void sendCustomMessage(ScreenshotEntry entry) {
-		String escapedName = entry.fileName().replace("\"", "\\\"");
+        private void sendCustomMessage(ScreenshotEntry entry) {
+                String escapedName = entry.fileName().replace("\"", "\\\"");
 
-		MutableComponent copyAction = Component.translatable("snapview.chat.copy")
-				.withStyle(style -> style.withClickEvent(
-						new ClickEvent.RunCommand("/snapview copy \"" + escapedName + "\"")));
+                MutableComponent copyAction = Component.translatable("snapview.chat.copy")
+                                .withStyle(style -> style.withClickEvent(
+                                                new ClickEvent.RunCommand("/snapview copy \"" + escapedName + "\"")));
 
-		MutableComponent galleryAction = Component.translatable("snapview.chat.gallery")
-				.withStyle(style -> style.withClickEvent(
-						new ClickEvent.RunCommand("/snapview gallery")));
+                MutableComponent galleryAction = Component.translatable("snapview.chat.gallery")
+                                .withStyle(style -> style.withClickEvent(
+                                                new ClickEvent.RunCommand("/snapview gallery")));
 
-		MutableComponent fullMessage = Component.translatable("snapview.chat.saved")
-				.append(Component.literal("  "))
-				.append(copyAction)
-				.append(Component.literal("  "))
-				.append(galleryAction);
+                MutableComponent fullMessage = Component.translatable("snapview.chat.saved")
+                                .append(Component.literal("  "))
+                                .append(copyAction)
+                                .append(Component.literal("  "))
+                                .append(galleryAction);
 
-		Minecraft.getInstance().gui.getChat().addMessage(fullMessage);
-	}
+                // ChatComponent#addMessage was made private in 26.1; addClientSystemMessage is the
+        // public, supported way to push a non-player, non-server-originated message into chat.
+        Minecraft.getInstance().gui.getChat().addClientSystemMessage(fullMessage);
+        }
 }

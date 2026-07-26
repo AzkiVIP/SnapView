@@ -1,10 +1,8 @@
 package com.azkivip.snapview.client;
 
 import com.azkivip.snapview.client.chat.ScreenshotChatHandler;
-import com.azkivip.snapview.client.chat.ScreenshotWatcher;
 import com.azkivip.snapview.client.clipboard.ClipboardService;
 import com.azkivip.snapview.client.gui.GalleryScreen;
-import com.azkivip.snapview.client.integration.PauseMenuIntegration;
 import com.azkivip.snapview.client.screenshot.ScreenshotEntry;
 import com.azkivip.snapview.client.screenshot.ScreenshotRepository;
 import com.azkivip.snapview.client.thumbnail.ThumbnailDiskCache;
@@ -37,15 +35,9 @@ public final class SnapViewClient implements ClientModInitializer {
     private ScreenshotRepository repository;
     private ThumbnailDiskCache diskCache;
     private ThumbnailLoader thumbnailLoader;
-    private ScreenshotChatHandler chatHandler;
-    private ScreenshotWatcher screenshotWatcher;
-
-    private static SnapViewClient instance;
 
     @Override
     public void onInitializeClient() {
-        instance = this;
-
         Path gameDir = Minecraft.getInstance().gameDirectory.toPath();
         Path screenshotsDir = gameDir.resolve("screenshots");
         Path cacheDir = gameDir.resolve("snapview_cache").resolve("thumbnails");
@@ -53,10 +45,11 @@ public final class SnapViewClient implements ClientModInitializer {
         repository = new ScreenshotRepository(screenshotsDir);
         diskCache = new ThumbnailDiskCache(cacheDir);
         thumbnailLoader = new ThumbnailLoader(diskCache);
-        chatHandler = new ScreenshotChatHandler(repository);
-        screenshotWatcher = new ScreenshotWatcher(repository, chatHandler);
 
-        // Register the keybinding
+        new ScreenshotChatHandler(repository).register();
+
+        // In 26.1 the KeyMapping category is a KeyMapping.Category record
+        // keyed by an Identifier, not a free-form String.
         KeyMapping.Category snapviewCategory = KeyMapping.Category.register(
                 Identifier.fromNamespaceAndPath(MOD_ID, MOD_ID));
 
@@ -68,7 +61,6 @@ public final class SnapViewClient implements ClientModInitializer {
 
         registerCommands();
         registerTickHandler();
-        PauseMenuIntegration.register();
 
         LOGGER.info("SnapView initialized (screenshots dir: {})", screenshotsDir);
     }
@@ -95,10 +87,6 @@ public final class SnapViewClient implements ClientModInitializer {
             if (openGalleryKey != null && openGalleryKey.consumeClick()) {
                 openGallery();
             }
-            // Screenshot watcher polls for new screenshots
-            if (screenshotWatcher != null) {
-                screenshotWatcher.tick();
-            }
         });
     }
 
@@ -108,46 +96,14 @@ public final class SnapViewClient implements ClientModInitializer {
         client.setScreen(new GalleryScreen(current, repository, thumbnailLoader));
     }
 
-    /**
-     * Called by PauseMenuIntegration when the gallery button is clicked.
-     * Opens the gallery with the pause menu as the parent screen.
-     */
-    public static void openGalleryFromPauseMenu() {
-        if (instance == null) return;
-        Minecraft client = Minecraft.getInstance();
-        Screen current = client.screen;
-        client.setScreen(new GalleryScreen(current, instance.repository, instance.thumbnailLoader));
-    }
-
-    /**
-     * Returns the singleton instance, used by GUI screens to access the
-     * repository, thumbnail loader, and disk cache.
-     */
-    public static SnapViewClient getInstance() {
-        return instance;
-    }
-
-    public ScreenshotRepository getRepository() {
-        return repository;
-    }
-
-    public ThumbnailLoader getThumbnailLoader() {
-        return thumbnailLoader;
-    }
-
-    public ThumbnailDiskCache getDiskCache() {
-        return diskCache;
-    }
-
     private void copyByFileName(String fileName) {
         // Strip surrounding quotes if present. The chat click-event command
-        // wraps the filename in quotes ("/snapview copy "filename""), and
-        // greedyString captures them literally. Without stripping, the path
-        // resolve would fail with "Illegal char <"> at index 0".
+        // wraps the filename in quotes, and greedyString captures them
+        // literally. Without stripping, path resolve fails with
+        // "Illegal char <"> at index 0".
         if (fileName.length() >= 2 && fileName.startsWith("\"") && fileName.endsWith("\"")) {
             fileName = fileName.substring(1, fileName.length() - 1);
         }
-        // Also unescape any escaped quotes
         fileName = fileName.replace("\\\"", "\"");
 
         final String resolvedFileName = fileName;
@@ -162,6 +118,7 @@ public final class SnapViewClient implements ClientModInitializer {
         });
 
         if (target == null) {
+            LOGGER.warn("Copy: screenshot not found: {}", resolvedFileName);
             return;
         }
 
@@ -172,6 +129,7 @@ public final class SnapViewClient implements ClientModInitializer {
             }
             Component feedback = Component.translatable(
                     success ? "snapview.clipboard.copied" : "snapview.clipboard.failed");
+            // ChatComponent#addMessage is private in 26.1; use addClientSystemMessage.
             client.gui.getChat().addClientSystemMessage(feedback);
         });
     }

@@ -1,29 +1,26 @@
 {
-        "schemaVersion": 1,
-        "id": "snapview",
-        "version": "${version}",
-        "name": "SnapView",
-        "description": "In-game screenshot gallery, viewer and management, without leaving Minecraft.",
-        "authors": [
-                "AzkiVIP"
-        ],
-        "contact": {
-                "sources": "https://github.com/AzkiVIP/SnapView"
-        },
-        "license": "MIT",
-        "environment": "client",
-        "entrypoints": {
-                "client": [
-                        "com.azkivip.snapview.client.SnapViewClient"
-                ]
-        },
-        "depends": {
-                "fabricloader": ">=0.19.3",
-                "minecraft": "~26.1",
-                "java": ">=25",
-                "fabric-api": "*"
-        },
-        "mixins": [
-                "snapview.mixins.json"
-        ]
+	"schemaVersion": 1,
+	"id": "snapview",
+	"version": "${version}",
+	"name": "SnapView",
+	"description": "In-game screenshot gallery, viewer and management, without leaving Minecraft.",
+	"authors": [
+		"AzkiVIP"
+	],
+	"contact": {
+		"sources": "https://github.com/AzkiVIP/SnapView"
+	},
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"com.azkivip.snapview.client.SnapViewClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~26.1",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
 }

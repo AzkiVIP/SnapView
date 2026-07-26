@@ -7,6 +7,7 @@ import com.azkivip.snapview.client.thumbnail.ThumbnailTexture;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
@@ -58,15 +59,20 @@ public final class ScreenshotViewerScreen extends Screen {
                 .bounds(8, barY, 60, 20)
                 .build());
 
+        // Previous / Next
         addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.previous"),
                         b -> navigate(-1)).bounds(74, barY, 60, 20).build());
         addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.next"),
                         b -> navigate(1)).bounds(140, barY, 60, 20).build());
 
-        addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.copy"),
-                        b -> copyCurrent()).bounds(this.width - 160, barY, 70, 20).build());
+        // Delete, Copy, Rename on the right
+        int rightBtnsRight = this.width - 8;
         addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.rename"),
-                        b -> renameCurrent()).bounds(this.width - 84, barY, 76, 20).build());
+                        b -> renameCurrent()).bounds(rightBtnsRight - 76, barY, 76, 20).build());
+        addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.copy"),
+                        b -> copyCurrent()).bounds(rightBtnsRight - 76 - 4 - 70, barY, 70, 20).build());
+        addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.delete"),
+                        b -> deleteCurrent()).bounds(rightBtnsRight - 76 - 4 - 70 - 4 - 70, barY, 70, 20).build());
     }
 
     private void navigate(int delta) {
@@ -109,14 +115,15 @@ public final class ScreenshotViewerScreen extends Screen {
             return;
         }
 
+        // Release the old texture if it exists.
         releaseTexture();
 
         try {
-            // Reuse ThumbnailTexture.upload() — it handles the NativeImage
-            // conversion, the DynamicTexture.upload() call (critical for
-            // actually getting pixels onto the GPU in 26.1), and texture
-            // registration. Using a unique debugName per load prevents
-            // texture ID collisions.
+            // ThumbnailTexture.upload() handles the NativeImage pixel conversion,
+            // the DynamicTexture.upload() call (critical for actually getting
+            // pixels onto the GPU in 26.1), and texture registration. Reusing
+            // it here means the viewer and the gallery share the same proven
+            // upload path.
             currentTexture = ThumbnailTexture.upload(
                     "viewer_" + index + "_" + System.nanoTime(), image);
             imageWidth = image.getWidth();
@@ -135,6 +142,7 @@ public final class ScreenshotViewerScreen extends Screen {
 
     @Override
     public void onClose() {
+        // ESC or Back button -> return to the parent (GalleryScreen).
         releaseTexture();
         this.minecraft.setScreen(parent);
     }
@@ -147,47 +155,23 @@ public final class ScreenshotViewerScreen extends Screen {
             graphics.centeredText(this.font, Component.translatable("snapview.viewer.loadfailed"),
                     this.width / 2, this.height / 2, 0xFF5555);
         } else if (currentTexture != null) {
-            // --- Centering math (traced step by step) ---
-            //
-            // The viewport is the rectangle between the top filename bar and
-            // the bottom button bar. We center the image within this viewport
-            // while preserving aspect ratio.
-            //
-            // Top bar:    y = 0   .. 30  (filename + position indicator)
-            // Bottom bar: y = (this.height - 28) .. this.height (buttons)
-            //
-            // Available viewport:
-            //   viewportTop    = 32   (below the top bar)
-            //   viewportBottom = this.height - 32  (above the bottom bar)
-            //   viewportHeight = viewportBottom - viewportTop
-            //
-            // Scale: fit the image inside the viewport, preserving aspect
-            // ratio. Allow upscaling up to 2x so small screenshots are
-            // clearly visible (not tiny in the center of a large screen).
-            // Large screenshots scale down to fit.
-            //
-            // Position: center horizontally and vertically within the viewport.
-
-            int viewportTop = 32;
-            int viewportBottom = this.height - 32;
-            int viewportHeight = viewportBottom - viewportTop;
-            int viewportWidth = this.width;
-
-            double scaleW = (double) viewportWidth / imageWidth;
-            double scaleH = (double) viewportHeight / imageHeight;
-            double scale = Math.min(scaleW, scaleH);
-            // Allow upscaling up to 2x for small images; no extra cap needed
-            // for large images (scale is already < 1 in that case).
+            // Fit the image within the available viewport while preserving aspect ratio.
+            // Allow upscaling for small images so they don't appear tiny in the center
+            // of a large screen — but cap at 2x to avoid blurry pixelation.
+            int maxW = this.width - 40;
+            int maxH = this.height - 80;
+            double scale = Math.min(maxW / (double) imageWidth, maxH / (double) imageHeight);
+            // Allow upscaling up to 2x for small images; no cap for large images
+            // (scale is already < 1 in that case).
             scale = Math.min(scale, 2.0);
-
             int drawW = Math.max(1, (int) Math.round(imageWidth * scale));
             int drawH = Math.max(1, (int) Math.round(imageHeight * scale));
-
-            // Center horizontally within the full screen width
+            // Center horizontally and vertically (accounting for the top filename
+            // bar and the bottom button bar).
             int drawX = (this.width - drawW) / 2;
-            // Center vertically within the viewport (between top and bottom bars)
-            int drawY = viewportTop + (viewportHeight - drawH) / 2;
+            int drawY = (this.height - drawH) / 2 - 10;
 
+            // blit(Identifier, x, y, w, h, u0, v0, u1, v1) - UV in 0..1 space.
             graphics.blit(currentTexture.id(), drawX, drawY, drawW, drawH,
                     0.0f, 0.0f, 1.0f, 1.0f);
         } else if (isLoading) {
@@ -197,6 +181,7 @@ public final class ScreenshotViewerScreen extends Screen {
 
         // Filename at top
         graphics.centeredText(this.font, current().fileName(), this.width / 2, 8, 0xFFFFFF);
+
         // Position indicator
         graphics.centeredText(this.font, (index + 1) + " / " + entries.size(),
                 this.width / 2, 20, 0xAAAAAA);
@@ -216,6 +201,57 @@ public final class ScreenshotViewerScreen extends Screen {
             entries.set(index, renamed);
             statusMessage = Component.translatable("snapview.rename.success", renamed.fileName());
         }));
+    }
+
+    private void deleteCurrent() {
+        // Show a confirmation dialog before deleting
+        ScreenshotEntry entry = current();
+        this.minecraft.setScreen(new ConfirmScreen(
+                confirmed -> {
+                    if (confirmed) {
+                        performDelete(entry);
+                    } else {
+                        // Return to viewer
+                        this.minecraft.setScreen(this);
+                    }
+                },
+                Component.translatable("snapview.viewer.delete"),
+                Component.translatable("snapview.viewer.delete.confirm", entry.fileName())
+        ));
+    }
+
+    private void performDelete(ScreenshotEntry entry) {
+        try {
+            // Delete the actual screenshot file
+            java.nio.file.Files.deleteIfExists(entry.path());
+
+            // Delete the thumbnail cache entries for this file (all sizes)
+            var client = com.azkivip.snapview.client.SnapViewClient.getInstance();
+            if (client != null && client.getDiskCache() != null) {
+                client.getDiskCache().deleteForEntry(entry);
+            }
+
+            // Remove from repository
+            repository.removeEntry(entry);
+            entries.remove(entry);
+
+            // Navigate away or close
+            if (entries.isEmpty()) {
+                // No more screenshots — return to parent (gallery)
+                onClose();
+            } else {
+                // Adjust index and reload
+                if (index >= entries.size()) {
+                    index = entries.size() - 1;
+                }
+                releaseTexture();
+                loadCurrentImage();
+                statusMessage = Component.translatable("snapview.viewer.deleted");
+            }
+        } catch (Exception e) {
+            statusMessage = Component.translatable("snapview.viewer.deletefailed", e.getMessage());
+        }
+        this.minecraft.setScreen(this);
     }
 
     @Override

@@ -20,8 +20,8 @@ public final class ThumbnailTexture implements AutoCloseable {
      * Monotonic counter guaranteeing every texture gets a globally unique
      * Identifier, even across gallery open/close cycles. Without this, the
      * TextureManager.register() call could collide with a stale registration
-     * from a previous gallery session, causing the new texture to silently
-     * bind to the old (empty) GPU resource.
+     * from a previous gallery session that wasn't fully released, causing
+     * the new texture to silently bind to the old (empty) GPU resource.
      */
     private static final AtomicLong TEXTURE_COUNTER = new AtomicLong(0);
 
@@ -35,32 +35,11 @@ public final class ThumbnailTexture implements AutoCloseable {
     /**
      * Uploads a BufferedImage to the GPU as a DynamicTexture.
      * <p>
-     * This is the single entry point for all GPU texture uploads in SnapView.
-     * Both the gallery (thumbnails) and the viewer (full-size images) use it.
-     * <p>
-     * Pipeline (traced end-to-end):
-     * <ol>
-     *   <li>{@code BufferedImage.getRGB(x, y)} returns ARGB packed ints
-     *       (0xAARRGGBB in Java's int layout).</li>
-     *   <li>We convert ARGB → ABGR packed ints (0xAABBGGRR). This is what
-     *       {@code NativeImage.setPixelABGR} expects — the method name was
-     *       renamed from {@code setPixelRGBA} in 26.1 because the packed
-     *       value was always ABGR (little-endian RGBA byte order).</li>
-     *   <li>{@code new NativeImage(Format.RGBA, w, h, false)} allocates a
-     *       CPU-side pixel buffer with 4 bytes per pixel (R, G, B, A).</li>
-     *   <li>After writing all pixels via {@code setPixelABGR}, the buffer
-     *       contains bytes in R, G, B, A order (because the ABGR int is
-     *       stored little-endian → bytes R G B A).</li>
-     *   <li>{@code new DynamicTexture(Supplier, NativeImage)} creates the GL
-     *       texture object and allocates GPU storage, but in 26.1 it does
-     *       NOT upload the pixel data. We MUST call {@code texture.upload()}
-     *       to push the NativeImage pixels to the GPU. Without this call the
-     *       GPU texture memory stays at zero (all-black) — the exact
-     *       "black thumbnails" symptom.</li>
-     *   <li>{@code TextureManager.register(id, texture)} binds the
-     *       DynamicTexture to our Identifier so {@code graphics.blit(id, ...)}
-     *       can render it.</li>
-     * </ol>
+     * CRITICAL: the DynamicTexture(Supplier, NativeImage) constructor in 26.1
+     * creates the GL texture object but does NOT upload the pixel data.
+     * We must call {@link DynamicTexture#upload()} explicitly. Without this
+     * call, the GPU texture memory is uninitialized (all zeros = transparent
+     * black), which is exactly the "black thumbnails" symptom.
      */
     public static ThumbnailTexture upload(String debugName, BufferedImage image) {
         int width = image.getWidth();
@@ -68,11 +47,11 @@ public final class ThumbnailTexture implements AutoCloseable {
 
         NativeImage nativeImage = new NativeImage(NativeImage.Format.RGBA, width, height, false);
 
-        // Convert ARGB (Java BufferedImage) → ABGR (NativeImage).
-        // ARGB int: 0xAARRGGBB
-        // ABGR int: 0xAABBGGRR
-        // When the ABGR int is written to memory (little-endian), the bytes
-        // become R, G, B, A — which matches GL_RGBA8 expected by Format.RGBA.
+        // Java's BufferedImage.getRGB returns ARGB packed ints.
+        // NativeImage.setPixelABGR expects ABGR packed ints.
+        // ARGB 0xAARRGGBB -> ABGR 0xAABBGGRR
+        // When written to memory (little-endian), ABGR bytes become R G B A,
+        // matching GL_RGBA8 expected by Format.RGBA.
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 int argb = image.getRGB(x, y);
@@ -85,15 +64,16 @@ public final class ThumbnailTexture implements AutoCloseable {
             }
         }
 
-        // Globally unique ID so TextureManager.register() never collides
-        // with a stale registration from a previous session.
+        // Use a monotonic counter in the Identifier path so every texture
+        // gets a unique ID — no collision risk across gallery sessions even
+        // if TextureManager.release() is delayed or skipped.
         long uid = TEXTURE_COUNTER.incrementAndGet();
         Identifier id = Identifier.fromNamespaceAndPath("snapview",
                 "thumbnail/t" + uid + "_" + sanitize(debugName));
 
-        // CRITICAL: DynamicTexture(Supplier, NativeImage) in 26.1 creates the
-        // GL texture object + allocates storage, but does NOT upload pixels.
-        // We must call upload() explicitly.
+        // DynamicTexture(Supplier<String>, NativeImage) creates the GL texture
+        // object and allocates storage, but does NOT upload pixel data in 26.1.
+        // We must call upload() to push the NativeImage pixels to the GPU.
         DynamicTexture texture = new DynamicTexture(() -> "t" + uid, nativeImage);
         texture.upload();
 

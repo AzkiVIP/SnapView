@@ -7,6 +7,8 @@ import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -23,14 +25,11 @@ import java.util.function.Consumer;
  */
 public final class ThumbnailLoader implements AutoCloseable {
 
-    private static final org.slf4j.Logger LOGGER =
-            org.slf4j.LoggerFactory.getLogger("SnapView/ThumbnailLoader");
+    /** Base target box for thumbnails; actual size adapts to screen width in the gallery. */
+    public static final int BASE_THUMB_WIDTH = 240;
+    public static final int BASE_THUMB_HEIGHT = 135;
 
-    /** Fixed target box; screenshots are scaled to fit inside this while preserving aspect ratio. */
-    public static final int THUMB_WIDTH = 160;
-    public static final int THUMB_HEIGHT = 90;
-
-    /** Hard cap on simultaneously live GPU textures, independent of collection size. */
+    /** Hard cap on simultaneously live GPU textures. */
     private static final int MAX_LIVE_TEXTURES = 120;
 
     private final ExecutorService decodePool = Executors.newFixedThreadPool(2, runnable -> {
@@ -61,11 +60,25 @@ public final class ThumbnailLoader implements AutoCloseable {
     }
 
     public ThumbnailTexture peek(ScreenshotEntry entry) {
-        return liveTextures.get(entry.cacheKey());
+        return peek(entry, BASE_THUMB_WIDTH, BASE_THUMB_HEIGHT);
+    }
+
+    public ThumbnailTexture peek(ScreenshotEntry entry, int targetWidth, int targetHeight) {
+        return liveTextures.get(sizedKey(entry, targetWidth, targetHeight));
     }
 
     public void request(ScreenshotEntry entry, Consumer<ThumbnailTexture> onReady) {
-        String key = entry.cacheKey();
+        request(entry, BASE_THUMB_WIDTH, BASE_THUMB_HEIGHT, onReady);
+    }
+
+    /**
+     * Requests a thumbnail at a specific target size. The size is part of the
+     * cache key so switching screen resolutions doesn't serve a stale
+     * wrongly-scaled thumbnail.
+     */
+    public void request(ScreenshotEntry entry, int targetWidth, int targetHeight,
+                        Consumer<ThumbnailTexture> onReady) {
+        String key = sizedKey(entry, targetWidth, targetHeight);
 
         ThumbnailTexture existing = liveTextures.get(key);
         if (existing != null) {
@@ -79,9 +92,8 @@ public final class ThumbnailLoader implements AutoCloseable {
 
         Future<?> future = decodePool.submit(() -> {
             try {
-                BufferedImage thumbnail = loadOrGenerate(entry);
+                BufferedImage thumbnail = loadOrGenerate(entry, targetWidth, targetHeight, key);
                 if (thumbnail == null) {
-                    LOGGER.warn("Thumbnail generation returned null for {}", entry.fileName());
                     inFlight.remove(key);
                     pendingTasks.remove(key);
                     return;
@@ -90,20 +102,13 @@ public final class ThumbnailLoader implements AutoCloseable {
                     if (!inFlight.contains(key)) {
                         return; // Cancelled while decoding.
                     }
-                    try {
-                        ThumbnailTexture texture = ThumbnailTexture.upload(key, thumbnail);
-                        liveTextures.put(key, texture);
-                        inFlight.remove(key);
-                        pendingTasks.remove(key);
-                        onReady.accept(texture);
-                    } catch (Exception e) {
-                        LOGGER.error("Failed to upload thumbnail to GPU for {}", entry.fileName(), e);
-                        inFlight.remove(key);
-                        pendingTasks.remove(key);
-                    }
+                    ThumbnailTexture texture = ThumbnailTexture.upload(key, thumbnail);
+                    liveTextures.put(key, texture);
+                    inFlight.remove(key);
+                    pendingTasks.remove(key);
+                    onReady.accept(texture);
                 });
             } catch (Exception e) {
-                LOGGER.error("Failed to load thumbnail for {}", entry.fileName(), e);
                 inFlight.remove(key);
                 pendingTasks.remove(key);
             }
@@ -112,7 +117,11 @@ public final class ThumbnailLoader implements AutoCloseable {
     }
 
     public void cancel(ScreenshotEntry entry) {
-        String key = entry.cacheKey();
+        cancel(entry, BASE_THUMB_WIDTH, BASE_THUMB_HEIGHT);
+    }
+
+    public void cancel(ScreenshotEntry entry, int targetWidth, int targetHeight) {
+        String key = sizedKey(entry, targetWidth, targetHeight);
         Future<?> future = pendingTasks.remove(key);
         if (future != null) {
             future.cancel(true);
@@ -120,34 +129,30 @@ public final class ThumbnailLoader implements AutoCloseable {
         inFlight.remove(key);
     }
 
-    private BufferedImage loadOrGenerate(ScreenshotEntry entry) throws IOException {
-        // 1. Try disk cache first
-        if (diskCache.has(entry)) {
-            try {
-                BufferedImage cached = diskCache.read(entry);
-                if (cached != null) {
-                    return cached;
-                }
-                LOGGER.warn("Cache file for {} existed but ImageIO.read returned null (corrupt?) — regenerating", entry.fileName());
-            } catch (Exception e) {
-                LOGGER.warn("Failed to read cache file for {} — regenerating: {}", entry.fileName(), e.getMessage());
+    private static String sizedKey(ScreenshotEntry entry, int w, int h) {
+        return entry.cacheKey() + ":" + w + "x" + h;
+    }
+
+    private BufferedImage loadOrGenerate(ScreenshotEntry entry, int targetWidth, int targetHeight,
+                                          String sizedKey) throws IOException {
+        // Try disk cache first using the size-encoded key
+        Path cacheFile = diskCache.cacheFileForSizedKey(sizedKey);
+        if (Files.isRegularFile(cacheFile)) {
+            BufferedImage cached = ImageIO.read(cacheFile.toFile());
+            if (cached != null && cached.getWidth() == targetWidth && cached.getHeight() == targetHeight) {
+                return cached;
             }
         }
 
-        // 2. Decode the full-resolution source PNG
         BufferedImage full = ImageIO.read(entry.path().toFile());
         if (full == null) {
-            LOGGER.error("ImageIO.read returned null for source file {}", entry.path());
             return null;
         }
 
-        // 3. Downscale to thumbnail dimensions
-        BufferedImage scaled = downscale(full, THUMB_WIDTH, THUMB_HEIGHT);
+        BufferedImage scaled = downscale(full, targetWidth, targetHeight);
         full.flush();
 
-        // 4. Write to cache for next time
-        diskCache.write(entry, scaled);
-
+        diskCache.writeToPath(sizedKey, scaled);
         return scaled;
     }
 

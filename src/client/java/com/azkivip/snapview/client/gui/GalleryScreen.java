@@ -205,6 +205,10 @@ public final class GalleryScreen extends Screen {
 
         hoveredIndex = -1;
 
+        // Clip the thumbnail area so thumbnails never overlap the top toolbar
+        // (search field, buttons, cache info) when scrolling.
+        graphics.enableScissor(0, viewportTop, this.width, viewportBottom);
+
         for (int row = firstVisibleRow; row <= lastVisibleRow; row++) {
             int rowTop = viewportTop + (row * cellHeight) - (int) scrollOffset;
 
@@ -232,6 +236,8 @@ public final class GalleryScreen extends Screen {
                 renderCell(graphics, entry, cellX, cellY, hovered);
             }
         }
+
+        graphics.disableScissor();
 
         // Scrollbar
         int viewportHeight = viewportBottom - viewportTop;

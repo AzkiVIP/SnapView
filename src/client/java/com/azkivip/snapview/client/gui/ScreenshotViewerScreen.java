@@ -11,8 +11,6 @@ import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -93,41 +91,43 @@ public final class ScreenshotViewerScreen extends Screen {
     private void loadCurrentImage() {
         loadFailed = false;
         isLoading = true;
-        ScreenshotEntry entry = current();
+        final ScreenshotEntry entry = current();
+        final java.nio.file.Path path = entry.path();
 
+        // Upload the texture on the client thread (GPU operations must be on
+        // the render thread). We read the file from disk synchronously here
+        // but NativeImage.read is fast for PNG files.
+        // Actually, to avoid blocking the render thread, we read the NativeImage
+        // on a background thread, but we must upload it on the client thread.
+        // NativeImage.read itself is safe to call off-thread.
         CompletableFuture
-                .supplyAsync(() -> readImage(entry))
-                .thenAcceptAsync(this::onImageLoaded, Minecraft.getInstance()::execute);
+                .supplyAsync(() -> {
+                    try {
+                        return com.mojang.blaze3d.platform.NativeImage.read(
+                                java.nio.file.Files.newInputStream(path));
+                    } catch (Exception e) {
+                        return null;
+                    }
+                })
+                .thenAcceptAsync(nativeImage -> onImageLoaded(nativeImage, path), Minecraft.getInstance()::execute);
     }
 
-    private BufferedImage readImage(ScreenshotEntry entry) {
-        try {
-            return ImageIO.read(entry.path().toFile());
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private void onImageLoaded(BufferedImage image) {
+    private void onImageLoaded(com.mojang.blaze3d.platform.NativeImage nativeImage, java.nio.file.Path path) {
         isLoading = false;
-        if (image == null) {
+        if (nativeImage == null) {
             loadFailed = true;
             return;
         }
 
-        // Release the old texture if it exists.
         releaseTexture();
 
         try {
-            // ThumbnailTexture.upload() handles the NativeImage pixel conversion,
-            // the DynamicTexture.upload() call (critical for actually getting
-            // pixels onto the GPU in 26.1), and texture registration. Reusing
-            // it here means the viewer and the gallery share the same proven
-            // upload path.
-            currentTexture = ThumbnailTexture.upload(
-                    "viewer_" + index + "_" + System.nanoTime(), image);
-            imageWidth = image.getWidth();
-            imageHeight = image.getHeight();
+            int width = nativeImage.getWidth();
+            int height = nativeImage.getHeight();
+            currentTexture = ThumbnailTexture.uploadNativeImage(
+                    "viewer_" + index + "_" + System.nanoTime(), nativeImage);
+            imageWidth = width;
+            imageHeight = height;
         } catch (Exception e) {
             loadFailed = true;
         }

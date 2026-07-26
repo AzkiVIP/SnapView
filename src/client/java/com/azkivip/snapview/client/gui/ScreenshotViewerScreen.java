@@ -3,182 +3,259 @@ package com.azkivip.snapview.client.gui;
 import com.azkivip.snapview.client.clipboard.ClipboardService;
 import com.azkivip.snapview.client.screenshot.ScreenshotEntry;
 import com.azkivip.snapview.client.screenshot.ScreenshotRepository;
+import com.azkivip.snapview.client.thumbnail.ThumbnailTexture;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.gui.screens.Screen;
-import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.Identifier;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Shows a single screenshot at (up to) full resolution, with previous/next
- * navigation and the rename/copy actions.
+ * navigation, rename, copy, and a visible Back button.
  * <p>
- * Unlike the gallery grid, this screen only ever has at most one full-size
- * texture loaded at a time - the previous image's texture is released
- * before the next one is decoded, so browsing through hundreds of
- * screenshots here still can't accumulate memory.
+ * Only one full-size texture is loaded at a time. The previous image's
+ * texture is released before the next one is decoded.
  */
 public final class ScreenshotViewerScreen extends Screen {
 
-        private final Screen parent;
-        private final ScreenshotRepository repository;
-        private final List<ScreenshotEntry> entries;
-        private int index;
+    private final Screen parent;
+    private final ScreenshotRepository repository;
+    private final List<ScreenshotEntry> entries;
+    private int index;
 
-        private Identifier fullImageTextureId;
-        private int imageWidth;
-        private int imageHeight;
-        private boolean loadFailed;
+    private ThumbnailTexture currentTexture;
+    private int imageWidth;
+    private int imageHeight;
+    private boolean loadFailed;
+    private boolean isLoading;
 
-        private Component statusMessage = Component.empty();
+    private Component statusMessage = Component.empty();
 
-        public ScreenshotViewerScreen(Screen parent, ScreenshotRepository repository,
-                                       List<ScreenshotEntry> entries, int index) {
-                super(Component.literal(""));
-                this.parent = parent;
-                this.repository = repository;
-                this.entries = entries;
-                this.index = index;
+    public ScreenshotViewerScreen(Screen parent, ScreenshotRepository repository,
+                                   List<ScreenshotEntry> entries, int index) {
+        super(Component.literal(""));
+        this.parent = parent;
+        this.repository = repository;
+        this.entries = entries;
+        this.index = index;
+    }
+
+    @Override
+    protected void init() {
+        loadCurrentImage();
+
+        int barY = this.height - 28;
+
+        // Back button (always visible, leftmost)
+        addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.back"),
+                        b -> onClose())
+                .bounds(8, barY, 60, 20)
+                .build());
+
+        // Previous / Next
+        addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.previous"),
+                        b -> navigate(-1)).bounds(74, barY, 60, 20).build());
+        addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.next"),
+                        b -> navigate(1)).bounds(140, barY, 60, 20).build());
+
+        // Delete, Copy, Rename on the right
+        int rightBtnsRight = this.width - 8;
+        addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.rename"),
+                        b -> renameCurrent()).bounds(rightBtnsRight - 76, barY, 76, 20).build());
+        addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.copy"),
+                        b -> copyCurrent()).bounds(rightBtnsRight - 76 - 4 - 70, barY, 70, 20).build());
+        addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.delete"),
+                        b -> deleteCurrent()).bounds(rightBtnsRight - 76 - 4 - 70 - 4 - 70, barY, 70, 20).build());
+    }
+
+    private void navigate(int delta) {
+        int newIndex = index + delta;
+        if (newIndex < 0 || newIndex >= entries.size()) {
+            return;
+        }
+        releaseTexture();
+        index = newIndex;
+        statusMessage = Component.empty();
+        loadCurrentImage();
+    }
+
+    private ScreenshotEntry current() {
+        return entries.get(index);
+    }
+
+    private void loadCurrentImage() {
+        loadFailed = false;
+        isLoading = true;
+        ScreenshotEntry entry = current();
+
+        CompletableFuture
+                .supplyAsync(() -> readImage(entry))
+                .thenAcceptAsync(this::onImageLoaded, Minecraft.getInstance()::execute);
+    }
+
+    private BufferedImage readImage(ScreenshotEntry entry) {
+        try {
+            return ImageIO.read(entry.path().toFile());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void onImageLoaded(BufferedImage image) {
+        isLoading = false;
+        if (image == null) {
+            loadFailed = true;
+            return;
         }
 
-        @Override
-        protected void init() {
-                loadCurrentImage();
+        // Release the old texture if it exists.
+        releaseTexture();
 
-                int barY = this.height - 28;
-                addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.previous"),
-                                                b -> navigate(-1)).bounds(8, barY, 70, 20).build());
-                addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.next"),
-                                                b -> navigate(1)).bounds(84, barY, 70, 20).build());
-                addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.copy"),
-                                                b -> copyCurrent()).bounds(this.width - 160, barY, 70, 20).build());
-                addRenderableWidget(Button.builder(Component.translatable("snapview.viewer.rename"),
-                                                b -> renameCurrent()).bounds(this.width - 84, barY, 76, 20).build());
+        try {
+            // ThumbnailTexture.upload() handles the NativeImage pixel conversion,
+            // the DynamicTexture.upload() call (critical for actually getting
+            // pixels onto the GPU in 26.1), and texture registration. Reusing
+            // it here means the viewer and the gallery share the same proven
+            // upload path.
+            currentTexture = ThumbnailTexture.upload(
+                    "viewer_" + index + "_" + System.nanoTime(), image);
+            imageWidth = image.getWidth();
+            imageHeight = image.getHeight();
+        } catch (Exception e) {
+            loadFailed = true;
+        }
+    }
+
+    private void releaseTexture() {
+        if (currentTexture != null) {
+            currentTexture.close();
+            currentTexture = null;
+        }
+    }
+
+    @Override
+    public void onClose() {
+        // ESC or Back button -> return to the parent (GalleryScreen).
+        releaseTexture();
+        this.minecraft.setScreen(parent);
+    }
+
+    @Override
+    public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
+        super.extractRenderState(graphics, mouseX, mouseY, partialTick);
+
+        if (loadFailed) {
+            graphics.centeredText(this.font, Component.translatable("snapview.viewer.loadfailed"),
+                    this.width / 2, this.height / 2, 0xFF5555);
+        } else if (currentTexture != null) {
+            // Fit the image within the available viewport while preserving aspect ratio.
+            // Allow upscaling for small images so they don't appear tiny in the center
+            // of a large screen — but cap at 2x to avoid blurry pixelation.
+            int maxW = this.width - 40;
+            int maxH = this.height - 80;
+            double scale = Math.min(maxW / (double) imageWidth, maxH / (double) imageHeight);
+            // Allow upscaling up to 2x for small images; no cap for large images
+            // (scale is already < 1 in that case).
+            scale = Math.min(scale, 2.0);
+            int drawW = Math.max(1, (int) Math.round(imageWidth * scale));
+            int drawH = Math.max(1, (int) Math.round(imageHeight * scale));
+            // Center horizontally and vertically (accounting for the top filename
+            // bar and the bottom button bar).
+            int drawX = (this.width - drawW) / 2;
+            int drawY = (this.height - drawH) / 2 - 10;
+
+            // blit(Identifier, x, y, w, h, u0, v0, u1, v1) - UV in 0..1 space.
+            graphics.blit(currentTexture.id(), drawX, drawY, drawW, drawH,
+                    0.0f, 0.0f, 1.0f, 1.0f);
+        } else if (isLoading) {
+            graphics.centeredText(this.font, Component.translatable("snapview.viewer.loading"),
+                    this.width / 2, this.height / 2, 0xAAAAAA);
         }
 
-        private void navigate(int delta) {
-                int newIndex = index + delta;
-                if (newIndex < 0 || newIndex >= entries.size()) {
-                        return;
+        // Filename at top
+        graphics.centeredText(this.font, current().fileName(), this.width / 2, 8, 0xFFFFFF);
+
+        // Position indicator
+        graphics.centeredText(this.font, (index + 1) + " / " + entries.size(),
+                this.width / 2, 20, 0xAAAAAA);
+
+        if (!statusMessage.getString().isEmpty()) {
+            graphics.centeredText(this.font, statusMessage, this.width / 2, this.height - 40, 0xAAFFAA);
+        }
+    }
+
+    private void copyCurrent() {
+        ClipboardService.copyImageAsync(current().path(), Minecraft.getInstance()::execute, success ->
+                statusMessage = Component.translatable(success ? "snapview.clipboard.copied" : "snapview.clipboard.failed"));
+    }
+
+    private void renameCurrent() {
+        this.minecraft.setScreen(new RenameScreen(this, repository, current(), renamed -> {
+            entries.set(index, renamed);
+            statusMessage = Component.translatable("snapview.rename.success", renamed.fileName());
+        }));
+    }
+
+    private void deleteCurrent() {
+        // Show a confirmation dialog before deleting
+        ScreenshotEntry entry = current();
+        this.minecraft.setScreen(new ConfirmScreen(
+                confirmed -> {
+                    if (confirmed) {
+                        performDelete(entry);
+                    } else {
+                        // Return to viewer
+                        this.minecraft.setScreen(this);
+                    }
+                },
+                Component.translatable("snapview.viewer.delete"),
+                Component.translatable("snapview.viewer.delete.confirm", entry.fileName())
+        ));
+    }
+
+    private void performDelete(ScreenshotEntry entry) {
+        try {
+            // Delete the actual screenshot file
+            java.nio.file.Files.deleteIfExists(entry.path());
+
+            // Delete the thumbnail cache entries for this file (all sizes)
+            var client = com.azkivip.snapview.client.SnapViewClient.getInstance();
+            if (client != null && client.getDiskCache() != null) {
+                client.getDiskCache().deleteForEntry(entry);
+            }
+
+            // Remove from repository
+            repository.removeEntry(entry);
+            entries.remove(entry);
+
+            // Navigate away or close
+            if (entries.isEmpty()) {
+                // No more screenshots — return to parent (gallery)
+                onClose();
+            } else {
+                // Adjust index and reload
+                if (index >= entries.size()) {
+                    index = entries.size() - 1;
                 }
                 releaseTexture();
-                index = newIndex;
                 loadCurrentImage();
+                statusMessage = Component.translatable("snapview.viewer.deleted");
+            }
+        } catch (Exception e) {
+            statusMessage = Component.translatable("snapview.viewer.deletefailed", e.getMessage());
         }
+        this.minecraft.setScreen(this);
+    }
 
-        private ScreenshotEntry current() {
-                return entries.get(index);
-        }
-
-        private void loadCurrentImage() {
-                loadFailed = false;
-                ScreenshotEntry entry = current();
-
-                // Full-res decode happens off-thread even here, so opening the viewer
-                // never stalls a frame - the screen simply shows a blank frame for
-                // one or two frames while the texture uploads.
-                java.util.concurrent.CompletableFuture
-                                .supplyAsync(() -> readImage(entry))
-                                .thenAcceptAsync(this::onImageLoaded, Minecraft.getInstance()::execute);
-        }
-
-        private BufferedImage readImage(ScreenshotEntry entry) {
-                try {
-                        return ImageIO.read(entry.path().toFile());
-                } catch (Exception e) {
-                        return null;
-                }
-        }
-
-        private void onImageLoaded(BufferedImage image) {
-                if (image == null) {
-                        loadFailed = true;
-                        return;
-                }
-                if (entries.get(index) != current()) {
-                        return; // User navigated away before this finished loading.
-                }
-
-                com.mojang.blaze3d.platform.NativeImage nativeImage =
-                                new com.mojang.blaze3d.platform.NativeImage(
-                                                com.mojang.blaze3d.platform.NativeImage.Format.RGBA,
-                                                image.getWidth(), image.getHeight(), false);
-                for (int y = 0; y < image.getHeight(); y++) {
-                        for (int x = 0; x < image.getWidth(); x++) {
-                                int argb = image.getRGB(x, y);
-                                int a = (argb >>> 24) & 0xFF, r = (argb >>> 16) & 0xFF, g = (argb >>> 8) & 0xFF, b = argb & 0xFF;
-                                // 26.1: NativeImage#setPixelRGBA was renamed setPixelABGR (the
-                                // packed value was always ABGR; the old name was a misnomer).
-                                nativeImage.setPixelABGR(x, y, (a << 24) | (b << 16) | (g << 8) | r);
-                        }
-                }
-
-                fullImageTextureId = Identifier.fromNamespaceAndPath("snapview", "viewer/full");
-                // DynamicTexture(NativeImage) is gone in 26.1; the constructor now takes a
-                // Supplier<String> debug label alongside the NativeImage.
-                Minecraft.getInstance().getTextureManager().register(fullImageTextureId,
-                                new DynamicTexture(() -> "snapview-viewer", nativeImage));
-                imageWidth = image.getWidth();
-                imageHeight = image.getHeight();
-        }
-
-        private void releaseTexture() {
-                if (fullImageTextureId != null) {
-                        Minecraft.getInstance().getTextureManager().release(fullImageTextureId);
-                        fullImageTextureId = null;
-                }
-        }
-
-        @Override
-        public void onClose() {
-                releaseTexture();
-                this.minecraft.setScreen(parent);
-        }
-
-        @Override
-        public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
-                super.extractRenderState(graphics, mouseX, mouseY, partialTick);
-
-                if (loadFailed) {
-                        graphics.centeredText(this.font, "Could not load image", this.width / 2, this.height / 2, 0xFF5555);
-                } else if (fullImageTextureId != null) {
-                        // Fit the image within the available viewport while preserving aspect ratio.
-                        int maxW = this.width - 40;
-                        int maxH = this.height - 80;
-                        double scale = Math.min(maxW / (double) imageWidth, maxH / (double) imageHeight);
-                        scale = Math.min(scale, 1.0);
-                        int drawW = (int) (imageWidth * scale);
-                        int drawH = (int) (imageHeight * scale);
-                        int drawX = (this.width - drawW) / 2;
-                        int drawY = (this.height - drawH) / 2 - 10;
-
-                        // 26.1 blit overload without a RenderPipeline takes
-                        // (Identifier, x, y, w, h, u0, v0, u1, v1) - UV floats in 0..1 space.
-                        // We sample the whole texture (0,0)-(1,1).
-                        graphics.blit(fullImageTextureId, drawX, drawY, drawW, drawH, 0.0f, 0.0f, 1.0f, 1.0f);
-                }
-
-                graphics.centeredText(this.font, current().fileName(), this.width / 2, 8, 0xFFFFFF);
-                if (!statusMessage.getString().isEmpty()) {
-                        graphics.centeredText(this.font, statusMessage, this.width / 2, this.height - 40, 0xAAFFAA);
-                }
-        }
-
-        private void copyCurrent() {
-                ClipboardService.copyImageAsync(current().path(), Minecraft.getInstance()::execute, success ->
-                                statusMessage = Component.translatable(success ? "snapview.clipboard.copied" : "snapview.clipboard.failed"));
-        }
-
-        private void renameCurrent() {
-                this.minecraft.setScreen(new RenameScreen(this, repository, current(), renamed -> {
-                        entries.set(index, renamed);
-                        statusMessage = Component.translatable("snapview.rename.success", renamed.fileName());
-                }));
-        }
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
 }

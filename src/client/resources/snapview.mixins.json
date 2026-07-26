@@ -1,0 +1,11 @@
+{
+    "required": true,
+    "package": "com.azkivip.snapview.client.mixin",
+    "compatibilityLevel": "JAVA_25",
+    "client": [
+        "ChatComponentMixin"
+    ],
+    "injectors": {
+        "defaultRequire": 1
+    }
+}

@@ -58,6 +58,81 @@ public final class ThumbnailDiskCache {
 		}
 	}
 
+	/**
+	 * Returns the cache file for an explicit (already size-encoded) key.
+	 * Used by ThumbnailLoader when the target thumbnail size varies.
+	 */
+	public Path cacheFileForSizedKey(String sizedKey) {
+		return cacheDirectory.resolve(hash(sizedKey) + ".png");
+	}
+
+	public void writeToPath(String sizedKey, BufferedImage thumbnail) {
+		try {
+			ImageIO.write(thumbnail, "png", cacheFileForSizedKey(sizedKey).toFile());
+		} catch (IOException ignored) {
+			// Non-fatal: the thumbnail is still usable this session.
+		}
+	}
+
+	/**
+	 * Deletes the cached thumbnail for a given screenshot entry (base size key).
+	 */
+	public void deleteForEntry(ScreenshotEntry entry) {
+		try {
+			java.nio.file.Files.deleteIfExists(cacheFileFor(entry));
+		} catch (IOException ignored) {
+			// Best-effort; stale cache files are harmless.
+		}
+	}
+
+	/**
+	 * Clears the entire thumbnail cache directory.
+	 */
+	public void clearAll() {
+		try (var stream = java.nio.file.Files.newDirectoryStream(cacheDirectory, "*.png")) {
+			for (java.nio.file.Path path : stream) {
+				try {
+					java.nio.file.Files.deleteIfExists(path);
+				} catch (IOException ignored) {
+					// Individual file deletion failures are non-fatal.
+				}
+			}
+		} catch (IOException ignored) {
+			// If we can't list the directory, there's nothing to clear.
+		}
+	}
+
+	/**
+	 * Returns the total size in bytes of all cache files.
+	 */
+	public long cacheSizeBytes() {
+		long total = 0;
+		try (var stream = java.nio.file.Files.newDirectoryStream(cacheDirectory, "*.png")) {
+			for (java.nio.file.Path path : stream) {
+				try {
+					total += java.nio.file.Files.size(path);
+				} catch (IOException ignored) {
+					// Skip unreadable files.
+				}
+			}
+		} catch (IOException ignored) {
+			// Directory not accessible.
+		}
+		return total;
+	}
+
+	public int cacheFileCount() {
+		int count = 0;
+		try (var stream = java.nio.file.Files.newDirectoryStream(cacheDirectory, "*.png")) {
+			for (java.nio.file.Path ignored : stream) {
+				count++;
+			}
+		} catch (IOException ignored) {
+			// Directory not accessible.
+		}
+		return count;
+	}
+
 	private static String hash(String key) {
 		try {
 			MessageDigest digest = MessageDigest.getInstance("SHA-1");

@@ -7,6 +7,8 @@ import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -19,166 +21,173 @@ import java.util.function.Consumer;
 /**
  * Loads thumbnails for the gallery grid without ever blocking the render
  * thread and without ever holding more than a bounded number of GPU
- * textures at once - this is what keeps memory/VRAM flat regardless of
- * how many screenshots exist on disk.
- * <p>
- * Callers (the gallery screen) are expected to call {@link #request} only
- * for entries currently visible (+ a small prefetch margin), and
- * {@link #cancel} for entries that scroll back out of that range before
- * their thumbnail finished loading.
+ * textures at once.
  */
 public final class ThumbnailLoader implements AutoCloseable {
 
-	/** Fixed target box; screenshots are scaled to fit inside this while preserving aspect ratio. */
-	public static final int THUMB_WIDTH = 160;
-	public static final int THUMB_HEIGHT = 90;
+    /** Base target box for thumbnails; actual size adapts to screen width in the gallery. */
+    public static final int BASE_THUMB_WIDTH = 240;
+    public static final int BASE_THUMB_HEIGHT = 135;
 
-	/** Hard cap on simultaneously live GPU textures, independent of collection size. */
-	private static final int MAX_LIVE_TEXTURES = 120;
+    /** Hard cap on simultaneously live GPU textures. */
+    private static final int MAX_LIVE_TEXTURES = 120;
 
-	private final ExecutorService decodePool = Executors.newFixedThreadPool(2, runnable -> {
-		Thread thread = new Thread(runnable, "SnapView-ThumbnailDecode");
-		thread.setDaemon(true);
-		thread.setPriority(Thread.NORM_PRIORITY - 1);
-		return thread;
-	});
+    private final ExecutorService decodePool = Executors.newFixedThreadPool(2, runnable -> {
+        Thread thread = new Thread(runnable, "SnapView-ThumbnailDecode");
+        thread.setDaemon(true);
+        thread.setPriority(Thread.NORM_PRIORITY - 1);
+        return thread;
+    });
 
-	private final ThumbnailDiskCache diskCache;
+    private final ThumbnailDiskCache diskCache;
 
-	// Access-ordered LRU: touching an entry (get) moves it to the back;
-	// once it grows past MAX_LIVE_TEXTURES the oldest texture is closed.
-	private final Map<String, ThumbnailTexture> liveTextures = new LinkedHashMap<>(256, 0.75f, true) {
-		@Override
-		protected boolean removeEldestEntry(Map.Entry<String, ThumbnailTexture> eldest) {
-			if (size() > MAX_LIVE_TEXTURES) {
-				eldest.getValue().close();
-				return true;
-			}
-			return false;
-		}
-	};
+    private final Map<String, ThumbnailTexture> liveTextures = new LinkedHashMap<>(256, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, ThumbnailTexture> eldest) {
+            if (size() > MAX_LIVE_TEXTURES) {
+                eldest.getValue().close();
+                return true;
+            }
+            return false;
+        }
+    };
 
-	private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
-	private final Map<String, Future<?>> pendingTasks = new ConcurrentHashMap<>();
+    private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+    private final Map<String, Future<?>> pendingTasks = new ConcurrentHashMap<>();
 
-	public ThumbnailLoader(ThumbnailDiskCache diskCache) {
-		this.diskCache = diskCache;
-	}
+    public ThumbnailLoader(ThumbnailDiskCache diskCache) {
+        this.diskCache = diskCache;
+    }
 
-	/** Returns the already-uploaded texture, if any, without triggering a load. Call from the client thread. */
-	public ThumbnailTexture peek(ScreenshotEntry entry) {
-		return liveTextures.get(entry.cacheKey());
-	}
+    public ThumbnailTexture peek(ScreenshotEntry entry) {
+        return peek(entry, BASE_THUMB_WIDTH, BASE_THUMB_HEIGHT);
+    }
 
-	/**
-	 * Requests a thumbnail. If it's already loaded, {@code onReady} fires
-	 * immediately (on the calling/client thread). Otherwise loading happens
-	 * in the background and {@code onReady} fires later via the client
-	 * thread's task queue. Safe to call every frame for visible slots - it's
-	 * a no-op once loaded or already in flight.
-	 */
-	public void request(ScreenshotEntry entry, Consumer<ThumbnailTexture> onReady) {
-		String key = entry.cacheKey();
+    public ThumbnailTexture peek(ScreenshotEntry entry, int targetWidth, int targetHeight) {
+        return liveTextures.get(sizedKey(entry, targetWidth, targetHeight));
+    }
 
-		ThumbnailTexture existing = liveTextures.get(key);
-		if (existing != null) {
-			onReady.accept(existing);
-			return;
-		}
+    public void request(ScreenshotEntry entry, Consumer<ThumbnailTexture> onReady) {
+        request(entry, BASE_THUMB_WIDTH, BASE_THUMB_HEIGHT, onReady);
+    }
 
-		if (!inFlight.add(key)) {
-			return; // Already loading.
-		}
+    /**
+     * Requests a thumbnail at a specific target size. The size is part of the
+     * cache key so switching screen resolutions doesn't serve a stale
+     * wrongly-scaled thumbnail.
+     */
+    public void request(ScreenshotEntry entry, int targetWidth, int targetHeight,
+                        Consumer<ThumbnailTexture> onReady) {
+        String key = sizedKey(entry, targetWidth, targetHeight);
 
-		Future<?> future = decodePool.submit(() -> {
-			try {
-				BufferedImage thumbnail = loadOrGenerate(entry);
-				if (thumbnail == null) {
-					return;
-				}
-				Minecraft.getInstance().execute(() -> {
-					// The request may have been cancelled while decoding finished;
-					// only upload to the GPU if we're still interested.
-					if (!inFlight.contains(key)) {
-						return;
-					}
-					ThumbnailTexture texture = ThumbnailTexture.upload(key, thumbnail);
-					liveTextures.put(key, texture);
-					inFlight.remove(key);
-					pendingTasks.remove(key);
-					onReady.accept(texture);
-				});
-			} catch (Exception e) {
-				inFlight.remove(key);
-				pendingTasks.remove(key);
-			}
-		});
-		pendingTasks.put(key, future);
-	}
+        ThumbnailTexture existing = liveTextures.get(key);
+        if (existing != null) {
+            onReady.accept(existing);
+            return;
+        }
 
-	/** Cancels a pending (not-yet-uploaded) load, e.g. because the slot scrolled off-screen. */
-	public void cancel(ScreenshotEntry entry) {
-		String key = entry.cacheKey();
-		Future<?> future = pendingTasks.remove(key);
-		if (future != null) {
-			future.cancel(true);
-		}
-		inFlight.remove(key);
-	}
+        if (!inFlight.add(key)) {
+            return; // Already loading.
+        }
 
-	private BufferedImage loadOrGenerate(ScreenshotEntry entry) throws IOException {
-		if (diskCache.has(entry)) {
-			BufferedImage cached = diskCache.read(entry);
-			if (cached != null) {
-				return cached;
-			}
-		}
+        Future<?> future = decodePool.submit(() -> {
+            try {
+                BufferedImage thumbnail = loadOrGenerate(entry, targetWidth, targetHeight, key);
+                if (thumbnail == null) {
+                    inFlight.remove(key);
+                    pendingTasks.remove(key);
+                    return;
+                }
+                Minecraft.getInstance().execute(() -> {
+                    if (!inFlight.contains(key)) {
+                        return; // Cancelled while decoding.
+                    }
+                    ThumbnailTexture texture = ThumbnailTexture.upload(key, thumbnail);
+                    liveTextures.put(key, texture);
+                    inFlight.remove(key);
+                    pendingTasks.remove(key);
+                    onReady.accept(texture);
+                });
+            } catch (Exception e) {
+                inFlight.remove(key);
+                pendingTasks.remove(key);
+            }
+        });
+        pendingTasks.put(key, future);
+    }
 
-		BufferedImage full = ImageIO.read(entry.path().toFile());
-		if (full == null) {
-			return null; // Corrupt/unreadable file - skip rather than crash the loader.
-		}
+    public void cancel(ScreenshotEntry entry) {
+        cancel(entry, BASE_THUMB_WIDTH, BASE_THUMB_HEIGHT);
+    }
 
-		BufferedImage scaled = downscale(full, THUMB_WIDTH, THUMB_HEIGHT);
-		full.flush(); // Release the full-resolution buffer immediately; we no longer need it.
+    public void cancel(ScreenshotEntry entry, int targetWidth, int targetHeight) {
+        String key = sizedKey(entry, targetWidth, targetHeight);
+        Future<?> future = pendingTasks.remove(key);
+        if (future != null) {
+            future.cancel(true);
+        }
+        inFlight.remove(key);
+    }
 
-		diskCache.write(entry, scaled);
-		return scaled;
-	}
+    private static String sizedKey(ScreenshotEntry entry, int w, int h) {
+        return entry.cacheKey() + ":" + w + "x" + h;
+    }
 
-	private static BufferedImage downscale(BufferedImage source, int maxWidth, int maxHeight) {
-		double scale = Math.min(
-				maxWidth / (double) source.getWidth(),
-				maxHeight / (double) source.getHeight()
-		);
-		int width = Math.max(1, (int) Math.round(source.getWidth() * scale));
-		int height = Math.max(1, (int) Math.round(source.getHeight() * scale));
+    private BufferedImage loadOrGenerate(ScreenshotEntry entry, int targetWidth, int targetHeight,
+                                          String sizedKey) throws IOException {
+        // Try disk cache first using the size-encoded key
+        Path cacheFile = diskCache.cacheFileForSizedKey(sizedKey);
+        if (Files.isRegularFile(cacheFile)) {
+            BufferedImage cached = ImageIO.read(cacheFile.toFile());
+            if (cached != null && cached.getWidth() == targetWidth && cached.getHeight() == targetHeight) {
+                return cached;
+            }
+        }
 
-		BufferedImage scaled = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-		Graphics2D g = scaled.createGraphics();
-		g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-		g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-		g.drawImage(source, 0, 0, width, height, null);
-		g.dispose();
-		return scaled;
-	}
+        BufferedImage full = ImageIO.read(entry.path().toFile());
+        if (full == null) {
+            return null;
+        }
 
-	/** Drops every live GPU texture. Call when the gallery screen closes to free VRAM. */
-	public void releaseAll() {
-		for (ThumbnailTexture texture : liveTextures.values()) {
-			texture.close();
-		}
-		liveTextures.clear();
-		for (Future<?> future : pendingTasks.values()) {
-			future.cancel(true);
-		}
-		pendingTasks.clear();
-		inFlight.clear();
-	}
+        BufferedImage scaled = downscale(full, targetWidth, targetHeight);
+        full.flush();
 
-	@Override
-	public void close() {
-		releaseAll();
-		decodePool.shutdownNow();
-	}
+        diskCache.writeToPath(sizedKey, scaled);
+        return scaled;
+    }
+
+    private static BufferedImage downscale(BufferedImage source, int maxWidth, int maxHeight) {
+        double scale = Math.min(
+                maxWidth / (double) source.getWidth(),
+                maxHeight / (double) source.getHeight()
+        );
+        int width = Math.max(1, (int) Math.round(source.getWidth() * scale));
+        int height = Math.max(1, (int) Math.round(source.getHeight() * scale));
+
+        BufferedImage scaled = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = scaled.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        g.drawImage(source, 0, 0, width, height, null);
+        g.dispose();
+        return scaled;
+    }
+
+    public void releaseAll() {
+        for (ThumbnailTexture texture : liveTextures.values()) {
+            texture.close();
+        }
+        liveTextures.clear();
+        for (Future<?> future : pendingTasks.values()) {
+            future.cancel(true);
+        }
+        pendingTasks.clear();
+        inFlight.clear();
+    }
+
+    @Override
+    public void close() {
+        releaseAll();
+        decodePool.shutdownNow();
+    }
 }

@@ -50,7 +50,7 @@ public final class ScreenshotChatHandler {
         }
 
         private boolean onGameMessage(Component message, boolean overlay) {
-                if (overlay || !isScreenshotMessage(message)) {
+                if (overlay || !isVanillaScreenshotMessage(message)) {
                         return true; // Not our message - let it through unchanged.
                 }
 
@@ -59,11 +59,17 @@ public final class ScreenshotChatHandler {
                         return true; // Couldn't resolve a file; fall back to vanilla behaviour rather than show a broken message.
                 }
 
-                sendCustomMessage(newest);
+                sendScreenshotSavedMessage(newest);
                 return false; // Suppress the vanilla message.
         }
 
-        private static boolean isScreenshotMessage(Component message) {
+        /**
+         * Checks whether a Component is the vanilla "screenshot.success" message.
+         * Public static so it can be called from a mixin (ChatComponentMixin)
+         * that intercepts ChatComponent.addClientSystemMessage to suppress the
+         * vanilla screenshot message.
+         */
+        public static boolean isVanillaScreenshotMessage(Component message) {
                 if (message.getContents() instanceof TranslatableContents translatable) {
                         return SCREENSHOT_TRANSLATION_KEY.equals(translatable.getKey());
                 }
@@ -72,7 +78,12 @@ public final class ScreenshotChatHandler {
                 return false;
         }
 
-        private void sendCustomMessage(ScreenshotEntry entry) {
+        /**
+         * Sends the custom screenshot-saved message with [Copy] and [Open Gallery]
+         * click actions. Public so it can be called from ScreenshotWatcher when a
+         * new screenshot file is detected on disk.
+         */
+        public void sendScreenshotSavedMessage(ScreenshotEntry entry) {
                 String escapedName = entry.fileName().replace("\"", "\\\"");
 
                 MutableComponent copyAction = Component.translatable("snapview.chat.copy")

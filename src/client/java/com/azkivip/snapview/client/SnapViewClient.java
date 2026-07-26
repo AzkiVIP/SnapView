@@ -36,8 +36,12 @@ public final class SnapViewClient implements ClientModInitializer {
     private ThumbnailDiskCache diskCache;
     private ThumbnailLoader thumbnailLoader;
 
+    private static SnapViewClient instance;
+
     @Override
     public void onInitializeClient() {
+        instance = this;
+
         Path gameDir = Minecraft.getInstance().gameDirectory.toPath();
         Path screenshotsDir = gameDir.resolve("screenshots");
         Path cacheDir = gameDir.resolve("snapview_cache").resolve("thumbnails");
@@ -94,6 +98,21 @@ public final class SnapViewClient implements ClientModInitializer {
         Minecraft client = Minecraft.getInstance();
         Screen current = client.screen;
         client.setScreen(new GalleryScreen(current, repository, thumbnailLoader));
+    }
+
+    /**
+     * Opens the gallery from the pause menu. Called by PauseMenuIntegration
+     * when the "Screenshot Gallery" button is clicked. Static so it can be
+     * invoked without an instance reference; uses the singleton {@code instance}
+     * field set during {@link #onInitializeClient()}.
+     */
+    public static void openGalleryFromPauseMenu() {
+        if (instance == null) {
+            return;
+        }
+        Minecraft client = Minecraft.getInstance();
+        Screen current = client.screen;
+        client.setScreen(new GalleryScreen(current, instance.repository, instance.thumbnailLoader));
     }
 
     private void copyByFileName(String fileName) {

@@ -112,10 +112,21 @@ public final class ScreenshotWatcher {
 
         ScreenshotEntry entry = ScreenshotEntry.of(screenshotPath);
 
+        // Check if an entry with this path already exists in the repository.
+        // This can happen after a rename: the ScreenshotWatcher detects the
+        // "new" file name on disk, but repository.replaceEntry() already
+        // updated the existing entry in-place. Adding it again would create
+        // a duplicate gallery entry.
+        for (ScreenshotEntry existing : repository.entries()) {
+            if (existing.path().equals(screenshotPath)) {
+                return; // Already in the repository — don't duplicate
+            }
+        }
+
         // Send the custom chat message with [Copy] and [Open Gallery] actions
         chatHandler.sendScreenshotSavedMessage(entry);
 
-        // Also add the entry to the repository's in-memory list so it appears
+        // Add the entry to the repository's in-memory list so it appears
         // in the gallery without needing a manual refresh
         repository.entries().add(0, entry);
     }

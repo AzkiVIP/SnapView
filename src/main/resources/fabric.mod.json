@@ -8,10 +8,12 @@
                 "AzkiVIP"
         ],
         "contact": {
-                "sources": "https://github.com/AzkiVIP/SnapView"
+                "sources": "https://github.com/AzkiVIP/SnapView",
+                "homepage": "https://www.instagram.com/azkivip/"
         },
         "license": "MIT",
         "environment": "client",
+        "icon": "assets/snapview/icon.png",
         "entrypoints": {
                 "client": [
                         "com.azkivip.snapview.client.SnapViewClient"

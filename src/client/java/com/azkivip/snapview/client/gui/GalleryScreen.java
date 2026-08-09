@@ -17,18 +17,30 @@ import java.util.List;
  * Screenshot gallery grid with virtual scrolling, search, and a responsive
  * 3-column layout on desktop.
  * <p>
- * The scrolling model is virtualized: {@link #extractRenderState} only ever
- * iterates over the rows that intersect the current viewport (plus one row
- * of prefetch margin). It never iterates the full entry list except to
- * compute total content height.
+ * <b>Header design</b>: The header uses the vanilla screen background (drawn
+ * by {@code super.extractRenderState} → {@code extractBackground}). A subtle
+ * separator line distinguishes the header area from the gallery content below.
+ * No separate dark rectangle is drawn — the header blends naturally with the
+ * vanilla screen background. Gallery content is rendered below the header with
+ * scissoring so thumbnails never overlap the header controls.
+ * <p>
+ * The scrolling model is virtualized: only rows intersecting the viewport
+ * (plus one row of prefetch) are rendered.
  */
 public final class GalleryScreen extends Screen {
 
     private static final int PADDING = 8;
     private static final int LABEL_HEIGHT = 12;
-    private static final int TOP_BAR_HEIGHT = 56;
+    /** Header area height (title row + controls row + bottom padding). */
+    private static final int HEADER_HEIGHT = 56;
+    /** Gap between the header bottom and the gallery content. */
+    private static final int HEADER_GAP = 4;
     private static final int MIN_THUMB_WIDTH = 120;
     private static final int MIN_THUMB_HEIGHT = 68;
+    private static final int MAX_TEX_DIMENSION = 768;
+
+    /** Subtle separator line below the header. */
+    private static final int HEADER_SEPARATOR_COLOR = 0x40808080;
 
     private final Screen parent;
     private final ScreenshotRepository repository;
@@ -39,6 +51,8 @@ public final class GalleryScreen extends Screen {
     private int thumbHeight = ThumbnailLoader.BASE_THUMB_HEIGHT;
     private int cellWidth;
     private int cellHeight;
+    private int texWidth = ThumbnailLoader.BASE_THUMB_WIDTH;
+    private int texHeight = ThumbnailLoader.BASE_THUMB_HEIGHT;
 
     private double scrollOffset = 0;
     private int hoveredIndex = -1;
@@ -57,43 +71,44 @@ public final class GalleryScreen extends Screen {
     protected void init() {
         computeLayout();
 
-        // Search field
-        int searchWidth = Math.min(300, this.width - PADDING * 2 - 200);
-        searchField = new EditBox(this.font, PADDING, PADDING + 24, searchWidth, 20,
+        // Search field — positioned with proper padding from the left edge.
+        int searchY = 28;
+        int searchWidth = Math.min(280, this.width - PADDING * 2 - 200);
+        searchField = new EditBox(this.font, PADDING, searchY, searchWidth, 20,
                 Component.translatable("snapview.gallery.search"));
         searchField.setMaxLength(100);
         searchField.setHint(Component.translatable("snapview.gallery.search.hint"));
         searchField.setValue(searchQuery);
         searchField.setResponder(text -> {
             searchQuery = text;
-            // Reset scroll when the filter changes so results are visible
             scrollOffset = 0;
         });
         addRenderableWidget(searchField);
         setInitialFocus(searchField);
 
-        // Clear Cache button (next to Back)
-        int clearCacheX = this.width - 80 - PADDING - 90 - PADDING;
-        addRenderableWidget(Button.builder(Component.translatable("snapview.gallery.clearcache"),
-                        button -> clearCache())
-                .bounds(clearCacheX, PADDING + 24, 90, 20)
-                .build());
+        // Clear Cache + Back buttons on the right side of the header
+        int btnY = searchY;
+        int backBtnW = 60;
+        int clearCacheBtnW = 90;
+        int btnSpacing = 4;
+        int rightEdge = this.width - PADDING;
 
-        // Back button
         addRenderableWidget(Button.builder(Component.translatable("snapview.gallery.back"),
                         button -> onClose())
-                .bounds(this.width - 80 - PADDING, PADDING + 24, 80, 20)
-                .build());
+                .bounds(rightEdge - backBtnW, btnY, backBtnW, 20).build());
+
+        addRenderableWidget(Button.builder(Component.translatable("snapview.gallery.clearcache"),
+                        button -> clearCache())
+                .bounds(rightEdge - backBtnW - btnSpacing - clearCacheBtnW, btnY,
+                        clearCacheBtnW, 20).build());
 
         if (!repository.isLoaded()) {
             repository.refreshAsync(this.minecraft::execute, entries -> {
-                // Repository updated; next render will show entries.
             });
         }
     }
 
     private void clearCache() {
-        // Confirm before clearing
         this.minecraft.setScreen(new net.minecraft.client.gui.screens.ConfirmScreen(
                 confirmed -> {
                     if (confirmed) {
@@ -101,8 +116,10 @@ public final class GalleryScreen extends Screen {
                         if (client != null && client.getDiskCache() != null) {
                             client.getDiskCache().clearAll();
                         }
-                        // Release all live textures so they regenerate from scratch
                         thumbnailLoader.releaseAll();
+                        // Scroll back to top so the user sees the refreshed gallery
+                        // from the beginning, not stuck at their previous scroll position.
+                        scrollOffset = 0;
                     }
                     this.minecraft.setScreen(this);
                 },
@@ -113,13 +130,8 @@ public final class GalleryScreen extends Screen {
 
     private void computeLayout() {
         int availableWidth = this.width - PADDING * 2;
-
-        // Always target 3 columns on desktop. Only reduce column count if the
-        // window is genuinely too small to fit 3 columns at MIN_THUMB_WIDTH.
-        // Note: this.width is the SCALED GUI width, not the window pixel width.
-        // At default GUI scale on a 1920px window, this.width is ~960.
-        int minColumns3Width = MIN_THUMB_WIDTH * 3 + PADDING * 4; // 3*120 + 32 = 392
-        int minColumns2Width = MIN_THUMB_WIDTH * 2 + PADDING * 3; // 2*120 + 24 = 264
+        int minColumns3Width = MIN_THUMB_WIDTH * 3 + PADDING * 4;
+        int minColumns2Width = MIN_THUMB_WIDTH * 2 + PADDING * 3;
 
         if (this.width < minColumns2Width) {
             columns = 1;
@@ -129,22 +141,21 @@ public final class GalleryScreen extends Screen {
             columns = 3;
         }
 
-        // Compute thumbnail size to fill the available width with the chosen column count.
         int totalPadding = PADDING * (columns + 1);
         thumbWidth = (availableWidth - totalPadding) / columns;
         thumbWidth = Math.max(MIN_THUMB_WIDTH, thumbWidth);
-
-        // Maintain 16:9 aspect ratio
         thumbHeight = thumbWidth * 9 / 16;
         thumbHeight = Math.max(MIN_THUMB_HEIGHT, thumbHeight);
-
         cellWidth = thumbWidth + PADDING;
         cellHeight = thumbHeight + PADDING + LABEL_HEIGHT;
+
+        double guiScale = this.minecraft.getWindow().getGuiScale();
+        texWidth = Math.min((int) Math.ceil(thumbWidth * guiScale), MAX_TEX_DIMENSION);
+        texHeight = Math.min((int) Math.ceil(thumbHeight * guiScale), MAX_TEX_DIMENSION);
     }
 
     @Override
     public void resize(int newWidth, int newHeight) {
-        // Save the search query before the screen is rebuilt
         String savedQuery = searchQuery;
         super.resize(newWidth, newHeight);
         searchQuery = savedQuery;
@@ -158,46 +169,55 @@ public final class GalleryScreen extends Screen {
 
     @Override
     public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
+        // super.extractRenderState calls extractBackground which draws the
+        // vanilla semi-transparent gradient background across the entire screen.
+        // This provides the base background — no separate dark rectangle needed.
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
 
         List<ScreenshotEntry> allEntries = repository.entries();
 
         if (!repository.isLoaded()) {
+            drawHeader(graphics, "", null);
             graphics.centeredText(this.font, Component.translatable("snapview.gallery.loading"),
-                    this.width / 2, this.height / 2, 0xFFFFFF);
+                    this.width / 2, this.height / 2, 0xFFFFFFFF);
             return;
         }
 
         List<ScreenshotEntry> entries = repository.filteredEntries(searchQuery);
 
-        if (entries.isEmpty()) {
-            Component emptyMsg = searchQuery.isBlank()
-                    ? Component.translatable("snapview.gallery.empty")
-                    : Component.translatable("snapview.gallery.noresults");
-            graphics.centeredText(this.font, emptyMsg, this.width / 2, this.height / 2, 0xAAAAAA);
-            return;
-        }
-
-        // Screenshot count display (top-right)
+        // Draw header text (title + info) and separator line.
+        // Split info into two compact, clearly-labeled lines:
+        // Line 1: "Screenshots: 124"
+        // Line 2: "Cache: 45.2 MB, 118 thumbnails"
         String countText = searchQuery.isBlank()
-                ? entries.size() + " screenshots"
-                : entries.size() + " / " + allEntries.size() + " screenshots";
-        graphics.text(this.font, countText, this.width - PADDING, PADDING + 4, 0xAAAAAA, false);
-
-        // Cache size display (top-left, below search field)
+                ? "Screenshots: " + entries.size()
+                : "Screenshots: " + entries.size() + " / " + allEntries.size();
+        String cacheText = null;
         var client = com.azkivip.snapview.client.SnapViewClient.getInstance();
         if (client != null && client.getDiskCache() != null) {
             long cacheBytes = client.getDiskCache().cacheSizeBytes();
             int cacheCount = client.getDiskCache().cacheFileCount();
-            String cacheText = "Cache: " + formatSize(cacheBytes) + " (" + cacheCount + " files)";
-            graphics.text(this.font, cacheText, PADDING, PADDING + 4, 0x888888, false);
+            cacheText = "Cache: " + formatSize(cacheBytes) + ", " + cacheCount + " thumbnails";
+        }
+        drawHeader(graphics, countText, cacheText);
+
+        if (entries.isEmpty()) {
+            Component emptyMsg = searchQuery.isBlank()
+                    ? Component.translatable("snapview.gallery.empty")
+                    : Component.translatable("snapview.gallery.noresults");
+            graphics.centeredText(this.font, emptyMsg, this.width / 2, this.height / 2, 0xFFAAAAAA);
+            return;
         }
 
-        int viewportTop = TOP_BAR_HEIGHT;
+        // Gallery content viewport starts below the header + gap.
+        int viewportTop = HEADER_HEIGHT + HEADER_GAP;
         int viewportBottom = this.height;
         int totalRows = (entries.size() + columns - 1) / columns;
         int contentHeight = totalRows * cellHeight;
         clampScroll(contentHeight, viewportBottom - viewportTop);
+
+        // Enable scissoring so gallery content never renders into the header.
+        graphics.enableScissor(0, viewportTop, this.width, viewportBottom);
 
         int firstVisibleRow = Math.max(0, (int) (scrollOffset / cellHeight) - 1);
         int lastVisibleRow = Math.min(totalRows - 1,
@@ -233,7 +253,7 @@ public final class GalleryScreen extends Screen {
             }
         }
 
-        // Scrollbar
+        // Scrollbar inside the scissored region
         int viewportHeight = viewportBottom - viewportTop;
         if (contentHeight > viewportHeight) {
             int scrollbarX = this.width - 4;
@@ -242,16 +262,52 @@ public final class GalleryScreen extends Screen {
             graphics.fill(scrollbarX, viewportTop, scrollbarX + 3, viewportBottom, 0x40404040);
             graphics.fill(scrollbarX, scrollbarY, scrollbarX + 3, scrollbarY + scrollbarHeight, 0x80808080);
         }
+
+        graphics.disableScissor();
+    }
+
+    /**
+     * Draws the header with title, compact info text (two lines), and a
+     * subtle separator line. No dark background panel — the vanilla screen
+     * background provides the base.
+     * <p>
+     * Info text is split into two short, clearly-labeled lines:
+     * <ul>
+     *   <li>Line 1 (y=4): "Screenshots: 124"</li>
+     *   <li>Line 2 (y=14): "Cache: 45.2 MB, 118 thumbnails"</li>
+     * </ul>
+     * Both use bright, high-contrast colors for readability on the vanilla
+     * dark background.
+     */
+    private void drawHeader(GuiGraphicsExtractor graphics, String countText, String cacheText) {
+        // Title at top center
+        graphics.centeredText(this.font, this.title, this.width / 2, 6, 0xFFFFFFFF);
+
+        // Line 1: screenshot count (top-right, y=4)
+        // Bright white for maximum readability
+        if (countText != null && !countText.isEmpty()) {
+            int w = this.font.width(countText);
+            graphics.text(this.font, countText, this.width - PADDING - w, 4, 0xFFFFFFFF, false);
+        }
+
+        // Line 2: cache info (below line 1, y=14)
+        // Light gray — bright enough to read but slightly dimmer than line 1
+        if (cacheText != null && !cacheText.isEmpty()) {
+            int w = this.font.width(cacheText);
+            graphics.text(this.font, cacheText, this.width - PADDING - w, 14, 0xFFCCCCCC, false);
+        }
+
+        // Subtle separator line at the bottom of the header area
+        graphics.fill(0, HEADER_HEIGHT, this.width, HEADER_HEIGHT + 1, HEADER_SEPARATOR_COLOR);
     }
 
     private void renderCell(GuiGraphicsExtractor graphics, ScreenshotEntry entry, int x, int y, boolean hovered) {
-        // Dark background placeholder
+        // Dark background placeholder for the thumbnail
         graphics.fill(x, y, x + thumbWidth, y + thumbHeight, 0xFF1E1E1E);
 
-        ThumbnailTexture texture = thumbnailLoader.peek(entry, thumbWidth, thumbHeight);
+        ThumbnailTexture texture = thumbnailLoader.peek(entry, texWidth, texHeight);
         if (texture == null) {
-            thumbnailLoader.request(entry, thumbWidth, thumbHeight, t -> {
-                // Next frame's peek() will find it.
+            thumbnailLoader.request(entry, texWidth, texHeight, t -> {
             });
         } else {
             drawThumbnail(graphics, texture, x, y);
@@ -261,14 +317,17 @@ public final class GalleryScreen extends Screen {
             graphics.outline(x - 1, y - 1, thumbWidth + 2, thumbHeight + 2, 0xFFFFFFFF);
         }
 
+        // Filename label below the thumbnail.
+        // Color MUST include 0xFF alpha prefix — without it, the text is
+        // fully transparent and invisible. 0xCCCCCC = alpha 0 (transparent);
+        // 0xFFCCCCCC = alpha 255 (opaque light gray).
         graphics.text(this.font, trimmedLabel(entry.fileName()),
-                x, y + thumbHeight + 2, 0xCCCCCC, false);
+                x, y + thumbHeight + 2, 0xFFCCCCCC, false);
     }
 
     private void drawThumbnail(GuiGraphicsExtractor graphics, ThumbnailTexture texture, int x, int y) {
-        // blit(Identifier, x, y, w, h, u0, v0, u1, v1) - UV in 0..1 space.
-        graphics.blit(texture.id(), x, y, thumbWidth, thumbHeight,
-                0.0f, 0.0f, 1.0f, 1.0f);
+        graphics.blit(texture.id(), x, y, x + thumbWidth, y + thumbHeight,
+                0.0f, 1.0f, 0.0f, 1.0f);
     }
 
     private String trimmedLabel(String fileName) {
@@ -295,6 +354,10 @@ public final class GalleryScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        // Only scroll when the cursor is in the gallery content area (below the header)
+        if (mouseY < HEADER_HEIGHT + HEADER_GAP) {
+            return false;
+        }
         scrollOffset -= scrollY * (cellHeight / 2.0);
         if (scrollOffset < 0) {
             scrollOffset = 0;

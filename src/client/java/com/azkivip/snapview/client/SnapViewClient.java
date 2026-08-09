@@ -165,13 +165,26 @@ public final class SnapViewClient implements ClientModInitializer {
             return;
         }
 
-        ClipboardService.copyImageAsync(target.path(), Minecraft.getInstance()::execute, success -> {
+        // Immediate feedback so the user knows the chat click was registered.
+        // The actual clipboard write takes ~1-3s on Windows (PowerShell cold-start).
+        Minecraft clientNow = Minecraft.getInstance();
+        if (clientNow.player != null) {
+            clientNow.gui.getChat().addClientSystemMessage(
+                    Component.translatable("snapview.clipboard.copying"));
+        }
+
+        ClipboardService.copyImageAsync(target.path(), Minecraft.getInstance()::execute, errorMessage -> {
             Minecraft client = Minecraft.getInstance();
             if (client.player == null) {
                 return;
             }
-            Component feedback = Component.translatable(
-                    success ? "snapview.clipboard.copied" : "snapview.clipboard.failed");
+            Component feedback;
+            if (errorMessage == null || errorMessage.isEmpty()) {
+                feedback = Component.translatable("snapview.clipboard.copied");
+            } else {
+                // Show the real reason for the failure in chat.
+                feedback = Component.translatable("snapview.clipboard.failed.reason", errorMessage);
+            }
             client.gui.getChat().addClientSystemMessage(feedback);
         });
     }

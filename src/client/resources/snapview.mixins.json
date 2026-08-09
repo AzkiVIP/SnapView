@@ -3,7 +3,8 @@
     "package": "com.azkivip.snapview.client.mixin",
     "compatibilityLevel": "JAVA_25",
     "client": [
-        "ChatComponentMixin"
+        "ChatComponentMixin",
+        "TitleScreenMixin"
     ],
     "injectors": {
         "defaultRequire": 1

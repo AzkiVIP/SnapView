@@ -35,11 +35,14 @@
   "snapview.rename.success": "Renamed to %s",
 
   "snapview.clipboard.copied": "Screenshot copied to clipboard",
+  "snapview.clipboard.copying": "Copying screenshot...",
   "snapview.clipboard.failed": "Could not copy screenshot to clipboard",
+  "snapview.clipboard.failed.reason": "Could not copy screenshot: %s",
 
   "snapview.chat.copy": "[Copy]",
   "snapview.chat.gallery": "[Open Gallery]",
   "snapview.chat.saved": "Screenshot saved:",
 
-  "snapview.pausemenu.gallery": "Screenshot Gallery"
+  "snapview.pausemenu.gallery": "Screenshot Gallery",
+  "snapview.title.gallery": "Screenshot Gallery"
 }

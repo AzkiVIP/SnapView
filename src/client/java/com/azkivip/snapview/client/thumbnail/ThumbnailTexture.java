@@ -2,7 +2,6 @@ package com.azkivip.snapview.client.thumbnail;
 
 import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.resources.Identifier;
 
 import java.awt.image.BufferedImage;
@@ -33,13 +32,17 @@ public final class ThumbnailTexture implements AutoCloseable {
     }
 
     /**
-     * Uploads a BufferedImage to the GPU as a DynamicTexture.
+     * Uploads a BufferedImage to the GPU as a {@link SmoothDynamicTexture}.
      * <p>
-     * CRITICAL: the DynamicTexture(Supplier, NativeImage) constructor in 26.1
-     * creates the GL texture object but does NOT upload the pixel data.
-     * We must call {@link DynamicTexture#upload()} explicitly. Without this
-     * call, the GPU texture memory is uninitialized (all zeros = transparent
-     * black), which is exactly the "black thumbnails" symptom.
+     * Uses LINEAR min/mag filtering and CLAMP_TO_EDGE address mode (via
+     * SmoothDynamicTexture) instead of the NEAREST/REPEAT that vanilla
+     * DynamicTexture hardcodes. This eliminates the "pixelated thumbnail"
+     * look when the texture is drawn at a size larger than its native pixel
+     * dimensions (which happens at any GUI scale > 1).
+     * <p>
+     * The pixel conversion (ARGB → ABGR → little-endian RGBA bytes) matches
+     * GL_RGBA8 / GL_UNSIGNED_BYTE as expected by
+     * {@code CommandEncoder.writeToTexture}.
      */
     public static ThumbnailTexture upload(String debugName, BufferedImage image) {
         int width = image.getWidth();
@@ -48,10 +51,14 @@ public final class ThumbnailTexture implements AutoCloseable {
         NativeImage nativeImage = new NativeImage(NativeImage.Format.RGBA, width, height, false);
 
         // Java's BufferedImage.getRGB returns ARGB packed ints.
-        // NativeImage.setPixelABGR expects ABGR packed ints.
+        // NativeImage.setPixelABGR expects ABGR packed ints (and only works on
+        // Format.RGBA images — it throws on other formats).
         // ARGB 0xAARRGGBB -> ABGR 0xAABBGGRR
-        // When written to memory (little-endian), ABGR bytes become R G B A,
-        // matching GL_RGBA8 expected by Format.RGBA.
+        // When written to memory (little-endian via MemoryUtil.memPutInt),
+        // the ABGR int 0xAABBGGRR becomes bytes R G B A in memory, which
+        // matches the GL_RGBA8 / GL_UNSIGNED_BYTE layout expected by
+        // CommandEncoder.writeToTexture (which calls glTexSubImage2D with
+        // GL_RGBA, GL_UNSIGNED_BYTE). Verified at byte level.
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 int argb = image.getRGB(x, y);
@@ -71,11 +78,11 @@ public final class ThumbnailTexture implements AutoCloseable {
         Identifier id = Identifier.fromNamespaceAndPath("snapview",
                 "thumbnail/t" + uid + "_" + sanitize(debugName));
 
-        // DynamicTexture(Supplier<String>, NativeImage) creates the GL texture
-        // object and allocates storage, but does NOT upload pixel data in 26.1.
-        // We must call upload() to push the NativeImage pixels to the GPU.
-        DynamicTexture texture = new DynamicTexture(() -> "t" + uid, nativeImage);
-        texture.upload();
+        // SmoothDynamicTexture (not vanilla DynamicTexture) to get LINEAR
+        // filtering instead of NEAREST. The constructor creates the GL texture,
+        // uploads pixels, and binds a LINEAR/CLAMP_TO_EDGE sampler — all
+        // in one call.
+        SmoothDynamicTexture texture = new SmoothDynamicTexture(() -> "t" + uid, nativeImage);
 
         Minecraft.getInstance().getTextureManager().register(id, texture);
 
